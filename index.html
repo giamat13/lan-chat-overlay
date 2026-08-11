@@ -58,6 +58,19 @@
     opacity: 0;
   }
 
+  /* When the panel just "pops" transiently (new message, not pinned),
+     keep it minimal: hide the top titlebar and bottom compose bar and
+     show only the messages. They come back once pinned (locked). */
+  #app.active:not(.locked) #titlebar,
+  #app.active:not(.locked) #compose {
+    opacity: 0;
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-color: transparent;
+    pointer-events: none;
+  }
+
   #titlebar {
     -webkit-app-region: drag;
     display: flex;
@@ -69,6 +82,9 @@
     font-size: 11px;
     letter-spacing: 0.02em;
     color: var(--ink-dim);
+    max-height: 40px;
+    overflow: hidden;
+    transition: opacity 0.5s ease, max-height 0.5s ease, padding 0.5s ease, border-color 0.5s ease;
   }
 
   #titlebar .dot {
@@ -198,6 +214,9 @@
     gap: 6px;
     padding: 8px;
     border-top: 1px solid rgba(53,224,138,0.14);
+    max-height: 60px;
+    overflow: hidden;
+    transition: opacity 0.5s ease, max-height 0.5s ease, padding 0.5s ease, border-color 0.5s ease;
   }
   #compose input {
     flex: 1;
@@ -302,6 +321,7 @@
 
   function setLocked(val) {
     locked = val;
+    appEl.classList.toggle('locked', val);
     pinToggle.style.opacity = val ? '1' : '0.55';
     pinToggle.style.filter = val ? 'drop-shadow(0 0 4px var(--accent))' : 'none';
     if (val) wake();

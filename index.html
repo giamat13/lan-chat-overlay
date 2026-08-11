@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>LAN Chat Overlay</title>
+<style>
+  :root {
+    --ink: #eafff2;
+    --ink-dim: rgba(234, 255, 242, 0.55);
+    --panel: rgba(10, 16, 14, 0.40);
+    --panel-strong: rgba(8, 13, 12, 0.55);
+    --accent: #35e08a;
+    --accent-dim: rgba(53, 224, 138, 0.35);
+    --danger: #ff5c6c;
+    --mono: 'Cascadia Code', 'Consolas', ui-monospace, monospace;
+    --sans: 'Segoe UI', system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: var(--sans);
+    user-select: none;
+    -webkit-app-region: no-drag;
+  }
+
+  #app {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    border-radius: 14px;
+    overflow: hidden;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.9s ease, transform 0.9s ease, background 0.9s ease, box-shadow 0.9s ease;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  /* Active state: something recently happened, so the panel is visible */
+  #app.active {
+    opacity: 1;
+    transform: translateY(0);
+    background: var(--panel);
+    box-shadow: 0 4px 18px rgba(0,0,0,0.22), inset 0 1px 0 rgba(255,255,255,0.03);
+    backdrop-filter: blur(3px);
+  }
+
+  /* Fully idle: invisible except a tiny corner glyph so the user can find it */
+  #app.idle-ghost {
+    opacity: 0;
+  }
+
+  #titlebar {
+    -webkit-app-region: drag;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 10px;
+    background: var(--panel-strong);
+    border-bottom: 1px solid rgba(53,224,138,0.18);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    color: var(--ink-dim);
+  }
+
+  #titlebar .dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #666;
+    margin-left: 6px;
+    box-shadow: 0 0 6px rgba(0,0,0,0.5);
+  }
+  #titlebar .dot.online { background: var(--accent); box-shadow: 0 0 6px var(--accent-dim); }
+  #titlebar .dot.pending { background: #e0c135; box-shadow: 0 0 6px rgba(224,193,53,0.4); }
+  #titlebar .dot.err { background: var(--danger); }
+
+  #titlebar .status-text {
+    flex: 1;
+    text-align: right;
+    padding-right: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #titlebar .win-btns { -webkit-app-region: no-drag; display: flex; gap: 4px; }
+  #titlebar button {
+    background: transparent;
+    border: none;
+    color: var(--ink-dim);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 5px;
+    border-radius: 4px;
+  }
+  #titlebar button:hover { background: rgba(255,255,255,0.08); color: var(--ink); }
+
+  #setup {
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    -webkit-app-region: no-drag;
+  }
+  #setup label { font-size: 10px; color: var(--ink-dim); }
+  #setup .row { display: flex; gap: 6px; }
+  #setup input[type=text] {
+    flex: 1;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(53,224,138,0.25);
+    color: var(--ink);
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+    outline: none;
+  }
+  #setup input[type=text]:focus { border-color: var(--accent); }
+  #setup button.connect-btn {
+    background: var(--accent);
+    color: #06120b;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-weight: 600;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #setup button.connect-btn:hover { filter: brightness(1.08); }
+  #setup button.connect-btn:disabled { opacity: 0.5; cursor: default; }
+  #setup .hint { font-size: 10px; color: var(--ink-dim); line-height: 1.5; }
+
+  #chat-area {
+    flex: 1;
+    display: none;
+    flex-direction: column;
+    min-height: 0;
+    -webkit-app-region: no-drag;
+  }
+  #chat-area.visible { display: flex; }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--accent-dim) transparent;
+  }
+  #messages::-webkit-scrollbar { width: 5px; }
+  #messages::-webkit-scrollbar-thumb { background: var(--accent-dim); border-radius: 3px; }
+
+  .msg {
+    max-width: 88%;
+    padding: 6px 10px;
+    border-radius: 12px;
+    font-size: 12.5px;
+    line-height: 1.4;
+    word-break: break-word;
+    animation: pop 0.25s ease;
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: scale(0.92) translateY(4px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+  .msg.me {
+    align-self: flex-start;
+    background: var(--accent);
+    color: #06120b;
+    border-bottom-left-radius: 3px;
+  }
+  .msg.peer {
+    align-self: flex-end;
+    background: rgba(255,255,255,0.10);
+    color: var(--ink);
+    border-bottom-right-radius: 3px;
+  }
+  .msg .ts {
+    display: block;
+    font-size: 9px;
+    opacity: 0.6;
+    margin-top: 2px;
+  }
+
+  #compose {
+    display: flex;
+    gap: 6px;
+    padding: 8px;
+    border-top: 1px solid rgba(53,224,138,0.14);
+  }
+  #compose input {
+    flex: 1;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid transparent;
+    color: var(--ink);
+    border-radius: 20px;
+    padding: 7px 12px;
+    font-size: 12.5px;
+    outline: none;
+  }
+  #compose input:focus { border-color: var(--accent-dim); }
+  #compose button {
+    background: var(--accent);
+    border: none;
+    color: #06120b;
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  #compose button:hover { filter: brightness(1.08); }
+
+  /* the tiny always-visible ghost mark shown when the panel is idle/invisible */
+  #ghost-mark {
+    position: fixed;
+    bottom: 6px;
+    left: 6px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-dim);
+    opacity: 0;
+    transition: opacity 0.6s ease;
+    pointer-events: none;
+  }
+  #ghost-mark.show { opacity: 0.55; }
+</style>
+</head>
+<body>
+  <div id="ghost-mark"></div>
+  <div id="app">
+    <div id="titlebar">
+      <span class="win-btns"><button id="pin-toggle" title="נעל פוקוס (Ctrl+Shift+C)">📌</button></span>
+      <span class="status-text" id="status-text">לא מחובר</span>
+      <span class="dot" id="status-dot"></span>
+    </div>
+
+    <div id="setup">
+      <label>IP של הצד השני (אותה רשת)</label>
+      <div class="row">
+        <input type="text" id="peer-ip" placeholder="לדוגמה: 192.168.1.23" />
+        <button class="connect-btn" id="connect-btn">התחבר</button>
+      </div>
+      <div class="hint">שני הצדדים מריצים את אותה תוכנה ומזינים את ה-IP של השני. מי שמתחבר ראשון הופך אוטומטית למארח.</div>
+    </div>
+
+    <div id="chat-area">
+      <div id="messages"></div>
+      <div id="compose">
+        <input type="text" id="msg-input" placeholder="הקלד הודעה..." />
+        <button id="send-btn">➤</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const appEl = document.getElementById('app');
+  const ghostMark = document.getElementById('ghost-mark');
+  const statusDot = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+  const setupEl = document.getElementById('setup');
+  const chatArea = document.getElementById('chat-area');
+  const peerIpInput = document.getElementById('peer-ip');
+  const connectBtn = document.getElementById('connect-btn');
+  const messagesEl = document.getElementById('messages');
+  const msgInput = document.getElementById('msg-input');
+  const sendBtn = document.getElementById('send-btn');
+  const pinToggle = document.getElementById('pin-toggle');
+
+  let idleTimer = null;
+  let locked = false; // when true (pinned), stays visible regardless of activity
+  const IDLE_DELAY_MS = 9000;
+
+  function wake() {
+    appEl.classList.add('active');
+    appEl.classList.remove('idle-ghost');
+    ghostMark.classList.remove('show');
+    clearTimeout(idleTimer);
+    if (!locked) {
+      idleTimer = setTimeout(goIdle, IDLE_DELAY_MS);
+    }
+  }
+
+  function goIdle() {
+    if (locked) return;
+    appEl.classList.remove('active');
+    appEl.classList.add('idle-ghost');
+    ghostMark.classList.add('show');
+  }
+
+  function setLocked(val) {
+    locked = val;
+    pinToggle.style.opacity = val ? '1' : '0.55';
+    pinToggle.style.filter = val ? 'drop-shadow(0 0 4px var(--accent))' : 'none';
+    if (val) wake();
+    else { clearTimeout(idleTimer); idleTimer = setTimeout(goIdle, IDLE_DELAY_MS); }
+    window.overlayAPI.setClickThrough(!val);
+  }
+
+  pinToggle.addEventListener('click', () => setLocked(!locked));
+  window.overlayAPI.onToggleFocusRequest(() => setLocked(!locked));
+
+  // Start click-through so the overlay never blocks game input until pinned
+  window.overlayAPI.setClickThrough(true);
+  // But the titlebar/compose area still need mouse events while active;
+  // we simply keep click-through off while active by default via hover forwarding.
+  appEl.addEventListener('mouseenter', () => { if (appEl.classList.contains('active')) window.overlayAPI.setClickThrough(false); });
+  appEl.addEventListener('mouseleave', () => { if (!locked) window.overlayAPI.setClickThrough(true); });
+
+  goIdle(); // start fully transparent
+
+  function fmtTime(ts) {
+    const d = new Date(ts);
+    return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+  }
+
+  function addMessage(text, who, ts) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + who;
+    const safe = document.createElement('span');
+    safe.textContent = text;
+    div.appendChild(safe);
+    const tsEl = document.createElement('span');
+    tsEl.className = 'ts';
+    tsEl.textContent = fmtTime(ts || Date.now());
+    div.appendChild(tsEl);
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    wake();
+  }
+
+  connectBtn.addEventListener('click', async () => {
+    const ip = peerIpInput.value.trim();
+    if (!ip) return;
+    connectBtn.disabled = true;
+    connectBtn.textContent = 'מתחבר...';
+    statusText.textContent = 'מתחבר...';
+    statusDot.className = 'dot pending';
+    wake();
+    const res = await window.overlayAPI.connect(ip);
+    if (!res.ok) {
+      statusText.textContent = res.error || 'שגיאה בחיבור';
+      statusDot.className = 'dot err';
+      connectBtn.disabled = false;
+      connectBtn.textContent = 'התחבר';
+    }
+  });
+
+  peerIpInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') connectBtn.click(); });
+
+  window.overlayAPI.onStatus((status) => {
+    wake();
+    if (status.state === 'listening') {
+      statusText.textContent = 'ממתין לחיבור מהצד השני...';
+      statusDot.className = 'dot pending';
+    } else if (status.state === 'connected') {
+      statusText.textContent = 'מחובר';
+      statusDot.className = 'dot online';
+      setupEl.style.display = 'none';
+      chatArea.classList.add('visible');
+      msgInput.focus();
+    } else if (status.state === 'disconnected') {
+      statusText.textContent = 'הצד השני התנתק';
+      statusDot.className = 'dot err';
+    } else if (status.state === 'error') {
+      statusText.textContent = status.error || 'שגיאה';
+      statusDot.className = 'dot err';
+      connectBtn.disabled = false;
+      connectBtn.textContent = 'התחבר';
+    }
+  });
+
+  window.overlayAPI.onMessage((msg) => {
+    addMessage(msg.text, 'peer', msg.ts);
+  });
+
+  async function doSend() {
+    const text = msgInput.value.trim();
+    if (!text) return;
+    const res = await window.overlayAPI.sendMessage(text);
+    if (res.ok) {
+      addMessage(text, 'me', res.ts);
+      msgInput.value = '';
+    }
+  }
+
+  sendBtn.addEventListener('click', doSend);
+  msgInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSend(); });
+  msgInput.addEventListener('focus', wake);
+</script>
+</body>
+</html>

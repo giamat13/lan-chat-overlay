@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, screen, globalShortcut } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const net = require('net');
 
 let mainWindow;
@@ -8,6 +9,47 @@ let client = null; // net.Socket - the active connection (either accepted or out
 let isServer = false;
 let listenPort = 51837; // fixed app port, same on both sides
 let recvBuffer = '';
+
+// --- Persisted config (remembers the peer IP between sessions) ---
+const CONFIG_PATH = path.join(app.getPath('userData'), 'lan-chat-overlay-config.json');
+
+function loadConfig() {
+  try {
+    const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+    return JSON.parse(raw);
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveConfig(cfg) {
+  try {
+    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8');
+  } catch (e) {
+    // best effort - not fatal
+  }
+}
+
+let config = loadConfig();
+
+// --- Auto-reconnect state ---
+let reconnectTimer = null;
+let manualDisconnect = false; // true only when the user explicitly clicks disconnect
+const RECONNECT_DELAY_MS = 2000;
+
+function stopReconnectLoop() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+}
+
+function scheduleReconnect(peerIp) {
+  if (manualDisconnect || !peerIp) return;
+  stopReconnectLoop();
+  reconnectTimer = setTimeout(() => {
+    if (manualDisconnect || client) return;
+    startConnection(peerIp, true);
+  }, RECONNECT_DELAY_MS);
+}
 
 function createWindow() {
   const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
@@ -49,10 +91,17 @@ function send(channel, payload) {
   }
 }
 
-function attachSocket(socket, role) {
+function attachSocket(socket, role, peerIp) {
   client = socket;
   isServer = role === 'server';
   recvBuffer = '';
+  manualDisconnect = false;
+  stopReconnectLoop();
+
+  if (peerIp) {
+    config.lastPeerIp = peerIp;
+    saveConfig(config);
+  }
 
   send('status', { state: 'connected', role });
 
@@ -75,7 +124,14 @@ function attachSocket(socket, role) {
 
   socket.on('close', () => {
     client = null;
-    send('status', { state: 'disconnected' });
+    if (manualDisconnect) {
+      send('status', { state: 'disconnected' });
+    } else {
+      // Peer probably closed the app - keep trying to get back in touch
+      // automatically instead of forcing both sides to click connect again.
+      send('status', { state: 'reconnecting' });
+      scheduleReconnect(peerIp || config.lastPeerIp);
+    }
   });
 
   socket.on('error', (err) => {
@@ -83,7 +139,7 @@ function attachSocket(socket, role) {
   });
 }
 
-ipcMain.handle('connect', async (_evt, { peerIp }) => {
+function startConnection(peerIp, isAutoReconnect) {
   // Strategy: BOTH sides listen on the fixed port AND simultaneously try to
   // connect out to the peer, in a race. Since the two sides are on two
   // different machines, listen() succeeding on both is expected and NOT a
@@ -98,8 +154,14 @@ ipcMain.handle('connect', async (_evt, { peerIp }) => {
       return;
     }
 
+    manualDisconnect = false;
+
     const CONNECT_RETRY_MS = 1500;
-    const CONNECT_GIVEUP_MS = 30000;
+    // Auto-reconnect attempts (after the peer briefly closed/reopened the
+    // app) keep retrying indefinitely in the background; a fresh manual
+    // click from the user still gives up after a while so the UI doesn't
+    // hang forever on a bad IP.
+    const CONNECT_GIVEUP_MS = isAutoReconnect ? 0 : 30000;
 
     let resolved = false;
     let retryTimer = null;
@@ -127,7 +189,7 @@ ipcMain.handle('connect', async (_evt, { peerIp }) => {
         return;
       }
       trialServer.close();
-      attachSocket(socket, 'server');
+      attachSocket(socket, 'server', peerIp);
       finish({ ok: true, mode: 'connected' });
     });
 
@@ -141,7 +203,7 @@ ipcMain.handle('connect', async (_evt, { peerIp }) => {
 
     trialServer.listen(listenPort, () => {
       server = trialServer;
-      if (!client) send('status', { state: 'listening', port: listenPort });
+      if (!client) send('status', { state: isAutoReconnect ? 'reconnecting' : 'listening', port: listenPort });
     });
 
     // --- Outgoing side: keep trying to connect to the peer ---
@@ -164,7 +226,7 @@ ipcMain.handle('connect', async (_evt, { peerIp }) => {
           return;
         }
         socket.removeListener('error', onError);
-        attachSocket(socket, 'client');
+        attachSocket(socket, 'client', peerIp);
         if (server) { try { server.close(); } catch (e) {} server = null; }
         finish({ ok: true, mode: 'connected' });
       });
@@ -175,12 +237,24 @@ ipcMain.handle('connect', async (_evt, { peerIp }) => {
     attemptClientConnect();
     retryTimer = setInterval(attemptClientConnect, CONNECT_RETRY_MS);
 
-    giveupTimer = setTimeout(() => {
-      if (resolved) return;
-      if (server) { try { server.close(); } catch (e) {} server = null; }
-      finish({ ok: false, error: 'לא הצלחתי להתחבר (timeout) - בדקו IP/פיירוול' });
-    }, CONNECT_GIVEUP_MS);
+    if (CONNECT_GIVEUP_MS > 0) {
+      giveupTimer = setTimeout(() => {
+        if (resolved) return;
+        if (server) { try { server.close(); } catch (e) {} server = null; }
+        finish({ ok: false, error: 'לא הצלחתי להתחבר (timeout) - בדקו IP/פיירוול' });
+      }, CONNECT_GIVEUP_MS);
+    }
   });
+}
+
+ipcMain.handle('connect', async (_evt, { peerIp }) => {
+  manualDisconnect = false;
+  stopReconnectLoop();
+  return startConnection(peerIp, false);
+});
+
+ipcMain.handle('get-saved-peer', async () => {
+  return { peerIp: config.lastPeerIp || '' };
 });
 
 ipcMain.handle('send-message', async (_evt, { text }) => {
@@ -195,6 +269,8 @@ ipcMain.handle('send-message', async (_evt, { text }) => {
 });
 
 ipcMain.handle('disconnect', async () => {
+  manualDisconnect = true;
+  stopReconnectLoop();
   if (client) client.destroy();
   if (server) { server.close(); server = null; }
   client = null;
@@ -214,6 +290,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  manualDisconnect = true;
+  stopReconnectLoop();
   globalShortcut.unregisterAll();
   if (client) client.destroy();
   if (server) server.close();

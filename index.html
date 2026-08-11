@@ -341,6 +341,17 @@
 
   goIdle(); // start fully transparent
 
+  // Remember who we talked to last time, and reconnect to them automatically.
+  (async () => {
+    try {
+      const { peerIp } = await window.overlayAPI.getSavedPeer();
+      if (peerIp) {
+        peerIpInput.value = peerIp;
+        connectBtn.click();
+      }
+    } catch (e) {}
+  })();
+
   function fmtTime(ts) {
     const d = new Date(ts);
     return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
@@ -394,6 +405,9 @@
     } else if (status.state === 'disconnected') {
       statusText.textContent = 'הצד השני התנתק';
       statusDot.className = 'dot err';
+    } else if (status.state === 'reconnecting') {
+      statusText.textContent = 'הצד השני יצא - מנסה להתחבר מחדש אוטומטית...';
+      statusDot.className = 'dot pending';
     } else if (status.state === 'error') {
       statusText.textContent = status.error || 'שגיאה';
       statusDot.className = 'dot err';

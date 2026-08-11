@@ -38,6 +38,13 @@ let reconnectTimer = null;
 let manualDisconnect = false; // true only when the user explicitly clicks disconnect
 const RECONNECT_DELAY_MS = 2000;
 
+// --- Manual-connect retry loop state ---
+// If we click "connect" but the peer never answers, don't just give up
+// after 30s and leave the user stuck - keep trying once a minute forever
+// (until the user disconnects or a connection succeeds).
+const MANUAL_CONNECT_TIMEOUT_MS = 60000; // give each attempt up to 1 minute
+const MANUAL_CONNECT_RETRY_DELAY_MS = 60000; // then wait a minute and retry
+
 function stopReconnectLoop() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 }
@@ -139,7 +146,7 @@ function attachSocket(socket, role, peerIp) {
   });
 }
 
-function startConnection(peerIp, isAutoReconnect) {
+function startConnection(peerIp, isAutoReconnect, giveupMsOverride) {
   // Strategy: BOTH sides listen on the fixed port AND simultaneously try to
   // connect out to the peer, in a race. Since the two sides are on two
   // different machines, listen() succeeding on both is expected and NOT a
@@ -161,7 +168,9 @@ function startConnection(peerIp, isAutoReconnect) {
     // app) keep retrying indefinitely in the background; a fresh manual
     // click from the user still gives up after a while so the UI doesn't
     // hang forever on a bad IP.
-    const CONNECT_GIVEUP_MS = isAutoReconnect ? 0 : 30000;
+    const CONNECT_GIVEUP_MS = giveupMsOverride !== undefined
+      ? giveupMsOverride
+      : (isAutoReconnect ? 0 : 30000);
 
     let resolved = false;
     let retryTimer = null;
@@ -247,10 +256,28 @@ function startConnection(peerIp, isAutoReconnect) {
   });
 }
 
+function manualConnectLoop(peerIp) {
+  if (manualDisconnect) return;
+
+  startConnection(peerIp, false, MANUAL_CONNECT_TIMEOUT_MS).then((res) => {
+    if (res.ok || manualDisconnect) return;
+
+    // A minute passed with no answer from the peer - instead of giving up
+    // for good, wait a minute and try again, and keep doing that until it
+    // connects or the user hits disconnect.
+    send('status', { state: 'listening', retryingIn: 60 });
+    stopReconnectLoop();
+    reconnectTimer = setTimeout(() => manualConnectLoop(peerIp), MANUAL_CONNECT_RETRY_DELAY_MS);
+  });
+}
+
 ipcMain.handle('connect', async (_evt, { peerIp }) => {
   manualDisconnect = false;
   stopReconnectLoop();
-  return startConnection(peerIp, false);
+  manualConnectLoop(peerIp);
+  // Don't block the UI on the full retry loop - the renderer gets live
+  // updates via 'status' events (listening / connected / reconnecting...).
+  return { ok: true, mode: 'connecting' };
 });
 
 ipcMain.handle('get-saved-peer', async () => {
